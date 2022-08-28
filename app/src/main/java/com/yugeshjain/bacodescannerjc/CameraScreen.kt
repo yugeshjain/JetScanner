@@ -4,7 +4,8 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.text.method.LinkMovementMethod
 import android.text.util.Linkify
-import android.util.Size
+import android.util.Log
+import android.view.ViewGroup
 import android.widget.TextView
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -41,17 +42,15 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.core.text.util.LinkifyCompat
+import com.google.common.util.concurrent.ListenableFuture
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 @Composable
 fun CameraScreen() {
-    var code by remember {
-        mutableStateOf("")
-    }
+    val barCodeVal = remember { mutableStateOf("") }
     val context = LocalContext.current
     val mCustomLinkifyText = remember { TextView(context) }
-    val cameraProviderFuture = remember {
-        ProcessCameraProvider.getInstance(context)
-    }
     val lifecycleOwner = LocalLifecycleOwner.current
     var hasCameraPermission by remember {
         mutableStateOf(
@@ -71,6 +70,9 @@ fun CameraScreen() {
     LaunchedEffect(key1 = true) {
         launcher.launch(Manifest.permission.CAMERA)
     }
+    var previewBoth by remember {
+        mutableStateOf<Preview?>(null)
+    }
     Column(
         modifier = Modifier.fillMaxSize()
     ) {
@@ -81,45 +83,69 @@ fun CameraScreen() {
             ) {
                 AndroidView(
                     factory = { context ->
-                        val previewView = PreviewView(context)
-                        val preview = Preview.Builder().build()
-                        val selector =
-                            CameraSelector.Builder()
-                                .requireLensFacing(CameraSelector.LENS_FACING_BACK).build()
-                        preview.setSurfaceProvider(previewView.surfaceProvider)
-                        val imageAnalysis = ImageAnalysis.Builder()
-                            .setTargetResolution(
-                                Size(
-                                    640,
-                                    480
-                                )
+                        PreviewView(context).apply {
+                            this.scaleType = PreviewView.ScaleType.FILL_CENTER
+                            layoutParams = ViewGroup.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT
                             )
-                            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                            .build()
-                        imageAnalysis.setAnalyzer(
-                            ContextCompat.getMainExecutor(context),
-                            CodeAnalyzer { result ->
-                                code = result
-                            }
-                        )
-                        try {
-                            cameraProviderFuture.get().bindToLifecycle(
-                                lifecycleOwner,
-                                selector,
-                                preview,
-                                imageAnalysis
-                            )
-                        } catch (e: Exception) {
-                            e.printStackTrace()
+                            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
                         }
-                        previewView
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                    update = { previewView ->
+                        val cameraSelector: CameraSelector = CameraSelector.Builder()
+                            .requireLensFacing(CameraSelector.LENS_FACING_BACK)
+                            .build()
+                        val cameraExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+                        val cameraProviderFuture: ListenableFuture<ProcessCameraProvider> =
+                            ProcessCameraProvider.getInstance(context)
+
+                        cameraProviderFuture.addListener(
+                            {
+                                previewBoth = Preview.Builder().build().also {
+                                    it.setSurfaceProvider(previewView.surfaceProvider)
+                                }
+                                val cameraProvider: ProcessCameraProvider =
+                                    cameraProviderFuture.get()
+                                val barcodeAnalyzer = CodeAnalyzer { barcodes ->
+                                    barcodes.forEach { barcode ->
+                                        barcode.rawValue?.let { barcodeValue ->
+                                            barCodeVal.value = barcodeValue
+                                        }
+                                    }
+                                }
+                                val imageAnalysis: ImageAnalysis = ImageAnalysis.Builder()
+                                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                                    .build()
+                                    .also {
+                                        it.setAnalyzer(cameraExecutor, barcodeAnalyzer)
+                                    }
+
+                                try {
+                                    cameraProvider.unbindAll()
+                                    cameraProvider.bindToLifecycle(
+                                        lifecycleOwner,
+                                        cameraSelector,
+                                        previewBoth,
+                                        imageAnalysis
+                                    )
+                                } catch (e: Exception) {
+                                    Log.d("TAG", "CameraPreview: ${e.localizedMessage}")
+                                }
+                            }, ContextCompat.getMainExecutor(context)
+                        )
                     }
                 )
                 Box(
                     modifier = Modifier
                         .border(1.dp, Color.Red, RectangleShape)
                         .size(
-                            LocalConfiguration.current.screenWidthDp.times(0.7).dp
+                            if (LocalConfiguration.current.screenWidthDp < LocalConfiguration.current.screenHeightDp) {
+                                LocalConfiguration.current.screenWidthDp.times(0.7).dp
+                            } else {
+                                LocalConfiguration.current.screenHeightDp.times(0.7).dp
+                            }
                         )
                         .background(Color.Transparent)
                 ) {}
@@ -135,7 +161,7 @@ fun CameraScreen() {
                 AndroidView(
                     factory = { mCustomLinkifyText }
                 ) { textView ->
-                    textView.text = code
+                    textView.text = barCodeVal.value
                     textView.textSize = 20F
                     LinkifyCompat.addLinks(textView, Linkify.ALL)
                     textView.movementMethod = LinkMovementMethod.getInstance()
